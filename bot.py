@@ -33,19 +33,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-# Categorías, igual a las de CONFIG en el Excel
+# Categorías de gasto
 CATEGORIAS = [
-    "Vivienda (alquiler/expensas)",
-    "Servicios (luz, gas, agua, internet)",
-    "Supermercado / comida",
-    "Transporte / nafta",
-    "Salud",
-    "Educación / facultad",
-    "Indumentaria",
-    "Ocio / salidas",
-    "Deudas / tarjetas",
-    "Ahorro",
-    "Otros",
+    "Servicios",
+    "Comida",
+    "Nafta",
+    "Facultad",
+    "Ropa",
+    "Salidas",
+    "Tarjetas",
+    "Inversiones/ahorro",
+    "Otro",
 ]
 
 MEDIOS_PAGO = ["Efectivo", "Débito", "Crédito", "Transferencia", "Mercado Pago"]
