@@ -50,25 +50,33 @@ CATEGORIAS = [
 
 MEDIOS_PAGO = ["Efectivo", "Débito", "Crédito", "Transferencia", "Mercado Pago"]
 
-# Estados de la conversación
+ORIGENES_INGRESO = ["Sueldo extra", "GS GROUP", "Changa", "Venta", "Otro"]
+
+# Estados de la conversación de /gasto
 MONTO, CATEGORIA, DESCRIPCION, MEDIO = range(4)
 
+# Estados de la conversación de /ingreso (rango distinto para no pisar los de arriba)
+MONTO_ING, DESCRIPCION_ING, ORIGEN_ING = range(4, 7)
+
 FIRST_DATA_ROW = 7  # la hoja GASTOS arranca los datos en la fila 7
+FIRST_DATA_ROW_INGRESOS = 7  # la hoja INGRESOS también arranca en la fila 7
+
+SHEET_TAB_INGRESOS = os.environ.get("SHEET_TAB_INGRESOS", "INGRESOS")
 
 
-def get_sheet():
+def get_sheet(tab_name=None):
     import json
 
     creds_dict = json.loads(GOOGLE_CREDS_JSON)
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     client = gspread.authorize(creds)
     sh = client.open(SPREADSHEET_NAME)
-    return sh.worksheet(SHEET_TAB)
+    return sh.worksheet(tab_name or SHEET_TAB)
 
 
-def next_empty_row(ws):
-    col_b = ws.col_values(2)  # columna B = Fecha
-    row = FIRST_DATA_ROW
+def next_empty_row(ws, first_row=FIRST_DATA_ROW):
+    col_b = ws.col_values(2)  # columna B = Fecha en ambas hojas
+    row = first_row
     while row <= len(col_b) + 1:
         if row > len(col_b) or not col_b[row - 1]:
             return row
@@ -85,8 +93,9 @@ def is_allowed(user_id: int) -> bool:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Hola! Soy tu bot de gastos.\n\n"
+        "👋 Hola! Soy tu bot de gastos e ingresos.\n\n"
         "Usá /gasto para cargar un gasto nuevo.\n"
+        "Usá /ingreso para cargar un ingreso nuevo.\n"
         "Usá /cancelar para abortar una carga en curso."
     )
 
@@ -167,8 +176,8 @@ async def recibir_medio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hoy = datetime.now().strftime("%d/%m/%Y")
 
     try:
-        ws = get_sheet()
-        row = next_empty_row(ws)
+        ws = get_sheet(SHEET_TAB)
+        row = next_empty_row(ws, FIRST_DATA_ROW)
         ws.update(
             f"B{row}:F{row}",
             [[hoy, categoria, descripcion, monto, medio]],
@@ -197,6 +206,84 @@ async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def ingreso_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("No tenés permiso para usar este bot.")
+        return ConversationHandler.END
+    await update.message.reply_text("💵 ¿Cuánto ingresaste? (solo el número, ej: 50000)")
+    return MONTO_ING
+
+
+async def recibir_monto_ingreso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    texto = update.message.text.strip().replace(",", ".").replace("$", "")
+    try:
+        monto = float(texto)
+        if monto <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text(
+            "Ese monto no parece válido. Mandá solo un número, ej: 50000"
+        )
+        return MONTO_ING
+
+    context.user_data["monto_ing"] = monto
+    await update.message.reply_text(
+        "📝 ¿Descripción del ingreso? (mandá - si no querés poner ninguna)"
+    )
+    return DESCRIPCION_ING
+
+
+async def recibir_descripcion_ingreso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    desc = update.message.text.strip()
+    if desc == "-":
+        desc = ""
+    context.user_data["descripcion_ing"] = desc
+
+    botones = [
+        [InlineKeyboardButton(origen, callback_data=f"origen::{i}")]
+        for i, origen in enumerate(ORIGENES_INGRESO)
+    ]
+    await update.message.reply_text(
+        "🏷️ ¿De dónde viene este ingreso?",
+        reply_markup=InlineKeyboardMarkup(botones),
+    )
+    return ORIGEN_ING
+
+
+async def recibir_origen_ingreso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split("::")[1])
+    origen = ORIGENES_INGRESO[idx]
+
+    monto = context.user_data["monto_ing"]
+    descripcion = context.user_data["descripcion_ing"]
+    hoy = datetime.now().strftime("%d/%m/%Y")
+
+    try:
+        ws = get_sheet(SHEET_TAB_INGRESOS)
+        row = next_empty_row(ws, FIRST_DATA_ROW_INGRESOS)
+        ws.update(
+            f"B{row}:E{row}",
+            [[hoy, descripcion, monto, origen]],
+        )
+        await query.edit_message_text(
+            f"✅ Ingreso registrado:\n"
+            f"📅 {hoy}\n"
+            f"📝 {descripcion or '(sin descripción)'}\n"
+            f"🏷️ {origen}\n"
+            f"💰 ${monto:,.0f}".replace(",", ".")
+        )
+    except Exception as e:
+        logger.exception("Error al escribir en Sheets")
+        await query.edit_message_text(
+            f"❌ Hubo un error al guardar el ingreso: {e}"
+        )
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -213,8 +300,23 @@ def main():
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
 
+    conv_handler_ingreso = ConversationHandler(
+        entry_points=[CommandHandler("ingreso", ingreso_start)],
+        states={
+            MONTO_ING: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_monto_ingreso)
+            ],
+            DESCRIPCION_ING: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_descripcion_ingreso)
+            ],
+            ORIGEN_ING: [CallbackQueryHandler(recibir_origen_ingreso, pattern=r"^origen::")],
+        },
+        fallbacks=[CommandHandler("cancelar", cancelar)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
+    app.add_handler(conv_handler_ingreso)
 
     logger.info("Bot iniciado. Esperando mensajes...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
