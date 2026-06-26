@@ -48,7 +48,7 @@ CATEGORIAS = [
 
 MEDIOS_PAGO = ["Efectivo", "Débito", "Crédito", "Transferencia", "Mercado Pago"]
 
-ORIGENES_INGRESO = ["Sueldo extra", "GS GROUP", "Changa", "Venta", "Otro"]
+ORIGENES_INGRESO = ["Sueldo Mas Melos", "Venta", "Comisión", "Changa", "Ahorro"]
 
 # Estados de la conversación de /gasto
 MONTO, CATEGORIA, DESCRIPCION, MEDIO = range(4)
