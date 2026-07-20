@@ -47,14 +47,15 @@ CATEGORIAS = [
 ]
 
 MEDIOS_PAGO = ["Efectivo", "Débito", "Crédito", "Transferencia", "Mercado Pago"]
+TARJETAS = ["UALA", "GALICIA"]
 
 ORIGENES_INGRESO = ["Sueldo Mas Melos", "Venta", "Comisión", "Changa", "Ahorro"]
 
 # Estados de la conversación de /gasto
-MONTO, CATEGORIA, DESCRIPCION, MEDIO = range(4)
+MONTO, CATEGORIA, DESCRIPCION, MEDIO, TARJETA = range(5)
 
 # Estados de la conversación de /ingreso (rango distinto para no pisar los de arriba)
-MONTO_ING, DESCRIPCION_ING, ORIGEN_ING = range(4, 7)
+MONTO_ING, DESCRIPCION_ING, ORIGEN_ING, MEDIO_ING = range(10, 14)
 
 FIRST_DATA_ROW = 7  # la hoja GASTOS arranca los datos en la fila 7
 FIRST_DATA_ROW_INGRESOS = 7  # la hoja INGRESOS también arranca en la fila 7
@@ -82,6 +83,13 @@ def next_empty_row(ws, first_row=FIRST_DATA_ROW):
     return row
 
 
+def necesita_tarjeta(categoria: str, medio: str) -> bool:
+    # Un gasto con tarjeta de crédito (no pagado todavía) o el pago de una
+    # tarjeta (categoría "Tarjetas") necesitan saber a qué tarjeta corresponden
+    # para poder calcular el saldo pendiente por tarjeta en la hoja SALDOS.
+    return medio == "Crédito" or categoria == "Tarjetas"
+
+
 def is_allowed(user_id: int) -> bool:
     if not ALLOWED_USER_IDS.strip():
         return True
@@ -96,6 +104,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Usá /ingreso para cargar un ingreso nuevo.\n"
         "Usá /cancelar para abortar una carga en curso."
     )
+
+
+# ---------------------------------------------------------------------------
+# /gasto
+# ---------------------------------------------------------------------------
 
 
 async def gasto_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -167,10 +180,42 @@ async def recibir_medio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     idx = int(query.data.split("::")[1])
     medio = MEDIOS_PAGO[idx]
+    context.user_data["medio"] = medio
 
+    categoria = context.user_data["categoria"]
+
+    if necesita_tarjeta(categoria, medio):
+        await query.edit_message_text(f"💳 Medio de pago: {medio}")
+        botones = [
+            [InlineKeyboardButton(t, callback_data=f"tarjeta::{i}")]
+            for i, t in enumerate(TARJETAS)
+        ]
+        await query.message.reply_text(
+            "💳 ¿Con qué tarjeta?"
+            if medio == "Crédito"
+            else "💳 ¿Qué tarjeta estás pagando?",
+            reply_markup=InlineKeyboardMarkup(botones),
+        )
+        return TARJETA
+
+    await guardar_gasto(query, context, tarjeta="")
+    return ConversationHandler.END
+
+
+async def recibir_tarjeta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split("::")[1])
+    tarjeta = TARJETAS[idx]
+    await guardar_gasto(query, context, tarjeta=tarjeta)
+    return ConversationHandler.END
+
+
+async def guardar_gasto(query, context: ContextTypes.DEFAULT_TYPE, tarjeta: str):
     monto = context.user_data["monto"]
     categoria = context.user_data["categoria"]
     descripcion = context.user_data["descripcion"]
+    medio = context.user_data["medio"]
     hoy = datetime.now().strftime("%d/%m/%Y")
 
     try:
@@ -180,12 +225,16 @@ async def recibir_medio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"B{row}:F{row}",
             [[hoy, categoria, descripcion, monto, medio]],
         )
+        if tarjeta:
+            ws.update_cell(row, 8, tarjeta)  # columna H = Tarjeta
+
+        tarjeta_linea = f"\n💳 Tarjeta: {tarjeta}" if tarjeta else ""
         await query.edit_message_text(
             f"✅ Gasto registrado:\n"
             f"📅 {hoy}\n"
             f"📂 {categoria}\n"
             f"📝 {descripcion or '(sin descripción)'}\n"
-            f"💳 {medio}\n"
+            f"💳 {medio}{tarjeta_linea}\n"
             f"💰 ${monto:,.0f}".replace(",", ".")
         )
     except Exception as e:
@@ -195,13 +244,17 @@ async def recibir_medio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     context.user_data.clear()
-    return ConversationHandler.END
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("Carga cancelada.")
     return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
+# /ingreso
+# ---------------------------------------------------------------------------
 
 
 async def ingreso_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,23 +306,44 @@ async def recibir_origen_ingreso(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     idx = int(query.data.split("::")[1])
     origen = ORIGENES_INGRESO[idx]
+    context.user_data["origen_ing"] = origen
+
+    await query.edit_message_text(f"🏷️ Origen: {origen}")
+    botones = [
+        [InlineKeyboardButton(medio, callback_data=f"medioing::{i}")]
+        for i, medio in enumerate(MEDIOS_PAGO)
+    ]
+    await query.message.reply_text(
+        "💳 ¿Con qué medio lo cobraste?",
+        reply_markup=InlineKeyboardMarkup(botones),
+    )
+    return MEDIO_ING
+
+
+async def recibir_medio_ingreso(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    idx = int(query.data.split("::")[1])
+    medio = MEDIOS_PAGO[idx]
 
     monto = context.user_data["monto_ing"]
     descripcion = context.user_data["descripcion_ing"]
+    origen = context.user_data["origen_ing"]
     hoy = datetime.now().strftime("%d/%m/%Y")
 
     try:
         ws = get_sheet(SHEET_TAB_INGRESOS)
         row = next_empty_row(ws, FIRST_DATA_ROW_INGRESOS)
         ws.update(
-            f"B{row}:E{row}",
-            [[hoy, descripcion, monto, origen]],
+            f"B{row}:F{row}",
+            [[hoy, descripcion, monto, origen, medio]],
         )
         await query.edit_message_text(
             f"✅ Ingreso registrado:\n"
             f"📅 {hoy}\n"
             f"📝 {descripcion or '(sin descripción)'}\n"
             f"🏷️ {origen}\n"
+            f"💳 {medio}\n"
             f"💰 ${monto:,.0f}".replace(",", ".")
         )
     except Exception as e:
@@ -294,6 +368,7 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_descripcion)
             ],
             MEDIO: [CallbackQueryHandler(recibir_medio, pattern=r"^medio::")],
+            TARJETA: [CallbackQueryHandler(recibir_tarjeta, pattern=r"^tarjeta::")],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
@@ -308,6 +383,9 @@ def main():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, recibir_descripcion_ingreso)
             ],
             ORIGEN_ING: [CallbackQueryHandler(recibir_origen_ingreso, pattern=r"^origen::")],
+            MEDIO_ING: [
+                CallbackQueryHandler(recibir_medio_ingreso, pattern=r"^medioing::")
+            ],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)],
     )
